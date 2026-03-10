@@ -437,7 +437,7 @@ class IQPostProcessing:
     @staticmethod
     def calc_avg_power(signal: np.array):
         if len(signal) != 0:
-            p_avg_dbm = 10 * np.log10(np.mean(np.abs(signal)) + 1e-12) + 30
+            p_avg_dbm = 10 * np.log10(np.mean(np.abs(signal)))
         else:
             p_avg_dbm = 999
         return p_avg_dbm
@@ -480,15 +480,15 @@ class IQPostProcessing:
         ble_type: str = None
     ):
         results = {
-            "time_from_start": time_from_start,
+            "time_from_start": f'{time_from_start} [sec]',
             'VERSION': VERSION,
             "raw_packet": raw_packet,
-            "drift": drift,
-            "frequecny_offest": f_offset,
-            "avg_power": p_avg_dbm,
+            "drift": f'{drift} [kHz]',
+            "frequecny_offest": f'{f_offset} [kHz]',
+            "avg_power": f'{p_avg_dbm} [dBm]',
             "crc": crc,
             "soft_bits": soft_bits,
-            "avg_df": avg_df,
+            "avg_df": f'{avg_df} [kHz]',
             "ble_type": ble_type
         }
         return results
@@ -547,6 +547,9 @@ class IQPostProcessing:
             debug_flag and print(f"Cannot load file [{mat_file_path}] due to [{e}]")
             result[plot_name] = IQPostProcessing.build_results_payload(time_from_start=time_from_start)
             return result
+
+        # Padding with zeros if the signal edges
+        iq_data = np.concatenate([np.zeros(495, dtype=iq_data.dtype), iq_data])
 
         # Calculate average power 
         p_avg_dbm = IQPostProcessing.calc_avg_power(iq_data)
@@ -627,6 +630,7 @@ class IQPostProcessing:
 
         avg_df_kHz = IQPostProcessing.calc_avg_df(soft_bits=soft_bits, symbol_rate=symbol_rate)
 
+        # Converting soft bits to be centered around the real frequecy
         harder_bits = ((hard_bits + 1) * 0.5).astype(int)
         if len(hard_bits) >= packet_len:
             packet = np.bitwise_xor(
@@ -727,4 +731,3 @@ if __name__ == "__main__":
        save_path=r"mat_files",
        debug_flag=True
     )
-     print(results)
