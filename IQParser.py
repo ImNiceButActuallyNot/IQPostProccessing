@@ -7,7 +7,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import resample_poly
 
-VERSION = '2.0.0'
+VERSION = '2.0.2'
+
 
 class IQPostProcessing:
     """
@@ -18,7 +19,7 @@ class IQPostProcessing:
     def hex_to_bit_vector(hex_string):
         """
         Converts a hex string to a bit vector with MSB on the right.
-        
+
         Parameters:
         - hex_string (str): Hexadecimal string to convert.
 
@@ -26,13 +27,12 @@ class IQPostProcessing:
         - bit_vector (list[int]): List of integers representing bits.
         """
         bit_vector = []
-        n_bytes = len(hex_string)//2
-        
+        n_bytes = len(hex_string) // 2
+
         for i in range(n_bytes):
             byte_hex = hex_string[2 * i: 2 * i + 2]
             byte_int = int(byte_hex, 16)
-            # Convert to 8-bit binary string, then map to integers (right-msb, big-endian)
-            byte_bits = [int(b) for b in f'{byte_int:08b}'][::-1]  # Reverse the bits
+            byte_bits = [int(b) for b in f'{byte_int:08b}'][::-1]
             bit_vector.extend(byte_bits)
         return bit_vector
 
@@ -41,12 +41,12 @@ class IQPostProcessing:
         assert len(bits) % 8 == 0, "Length of bits must be a multiple of 8"
         hex_string = ""
         for i in range(0, len(bits), 8):
-            byte_bits = bits[i:i+8]
-            byte_bits_reversed = byte_bits[::-1]  # Flip LSB to MSB within byte!
+            byte_bits = bits[i:i + 8]
+            byte_bits_reversed = byte_bits[::-1]
             byte_int = int("".join(map(str, byte_bits_reversed)), 2)
             hex_string += f"{byte_int:02X}"
         return hex_string
-    
+
     @staticmethod
     def burst_detect_by_envelope(signal, fs):
         """
@@ -62,31 +62,38 @@ class IQPostProcessing:
         - fall_index (np.array): End indices of bursts.
         """
         envelope = np.abs(signal)
+        if len(envelope) == 0:
+            return np.array([]), np.array([]), np.array([])
+
         threshold = np.max(envelope) / 10
 
-        # Binary detection of bursts
         binary_input = (envelope >= threshold).astype(int)
 
-        # Find rising edges (0 → 1) and falling edges (1 → 0)
-        rise_index = np.where((binary_input[0:-1] == 0) & (binary_input[1:] == 1))[0] 
-        fall_index = np.where((binary_input[0:-1] == 1) & (binary_input[1:] == 0))[0] 
+        rise_index = np.where((binary_input[0:-1] == 0) & (binary_input[1:] == 1))[0] + 1
+        fall_index = np.where((binary_input[0:-1] == 1) & (binary_input[1:] == 0))[0] + 1
 
-        # Handle case where the burst stays "on" until the end of the signal
         if len(rise_index) > len(fall_index):
             fall_index = np.append(fall_index, len(signal))
 
-        # Trim to same length (in case of any mismatch)
         min_length = min(len(rise_index), len(fall_index))
         rise_index = rise_index[:min_length]
         fall_index = fall_index[:min_length]
 
-        # Calculate burst durations in seconds
         delta_time_v = (fall_index - rise_index) / fs
 
         return delta_time_v, rise_index, fall_index
 
     @staticmethod
-    def estimate_frequency_offset(signal, rise_index, fall_index, delta_time_v, fs , samp_skip = 999,symbol_rate = 1e-6, dF_2MHz = 0.42):
+    def estimate_frequency_offset(
+        signal,
+        rise_index,
+        fall_index,
+        delta_time_v,
+        fs,
+        samp_skip=1000,
+        symbol_rate=1e-6,
+        dF_2MHz=0.42
+    ):
         """
         Estimate frequency offset and correct frequency data for bursts in an IQ signal.
 
@@ -98,8 +105,8 @@ class IQPostProcessing:
         - fs (float): Sampling frequency in Hz.
 
         Returns:
-        - frequency_offsets (list): List of frequency offsets (in MHz) for each burst.
-        - corrected_frequencies (list[np.array]): List of arrays containing corrected frequency data (in MHz) for each burst.
+        - frequency_offsets (list): List of frequency offsets in kHz.
+        - corrected_frequencies (list[np.array]): List of arrays containing corrected frequency data in kHz.
         - delta_time_index (int): Index of the burst used for frequency correction.
         """
         frequency_offsets = []
@@ -107,40 +114,47 @@ class IQPostProcessing:
         delta_time_index = None
         ble_type = None
 
-        samples_per_us = round(symbol_rate * fs)
         true_symbol_rate = 1e-6
         packet_len = 376
         preamble_addres = 'aad6be898e'
 
-        for i in range(len(delta_time_v)):
-            if delta_time_v[i] < 100e-6:  # Skip bursts shorter than 250 μs
-                continue
-            # Extract the current burst
-            burst_signal = signal[rise_index[i]:fall_index[i]]
+        samples_per_us = max(1, round(1e-6 * fs))
 
-            # Phase extraction
+        for i in range(len(delta_time_v)):
+            if delta_time_v[i] < 100e-6:
+                continue
+
+            burst_signal = signal[rise_index[i]:fall_index[i]]
+            if len(burst_signal) <= max(samp_skip + 10, samples_per_us * 120):
+                continue
+
             burst_phase = np.unwrap(np.angle(burst_signal)) / (2 * np.pi)
 
-            # Frequency estimation over 1 μs windows
-            burst_freq = burst_phase[samples_per_us:] - burst_phase[0:-samples_per_us]
+            phase_segment = burst_phase[samp_skip:]
+            if len(phase_segment) < 10:
+                continue
 
-            # Rough frequency offset estimation using linear phase fitting
-            phase_segment = burst_phase[samp_skip:]  # Skip first samples for LO to stabilize
             time_segment = np.arange(len(phase_segment)) / fs
             coef = np.polyfit(time_segment, phase_segment, 1)
 
-            frequency_offset = coef[0] * 1e-3  # Convert from kHz to MHz
-            
-            #Estimate frequecny deviation 
-            phase_over_usec = phase_segment[samples_per_us:] - phase_segment[:-samples_per_us]
-            phase_mid = phase_over_usec[samples_per_us*30:-samples_per_us*30] - frequency_offset*1e-3
-            
-            if(np.max(np.abs(phase_mid)) > dF_2MHz):
+            # Store offset in kHz so downstream f_c = input_center + 1e3 * f_offset still works.
+            frequency_offset = coef[0] * 1e-3
+
+            phase_over_usec = burst_phase[samples_per_us:] - burst_phase[:-samples_per_us]
+
+            guard_samps = samples_per_us * 50
+            if len(phase_over_usec) <= 2 * guard_samps:
+                continue
+
+            # phase_over_usec is cycles per 1usec, numerically MHz
+            phase_mid = phase_over_usec[guard_samps:-guard_samps] - frequency_offset * 1e-3
+
+            if np.max(np.abs(phase_mid)) > dF_2MHz:
                 true_symbol_rate = 0.5e-6
                 packet_len = 480
                 preamble_addres = 'aaaad6be898e'
                 ble_type = 'BLE5-DBL-EXT'
-            elif (delta_time_v[i] > 250e-6):
+            elif delta_time_v[i] > 250e-6:
                 true_symbol_rate = 1e-6
                 packet_len = 376
                 preamble_addres = 'aad6be898e'
@@ -151,53 +165,64 @@ class IQPostProcessing:
                 preamble_addres = 'aad6be898e'
                 ble_type = 'BLE5-AUX-PTR'
 
-            # Correct frequency data
-            corrected_freq = burst_freq - frequency_offset * 1e-3
+            samples_per_symbol = max(1, round(true_symbol_rate * fs))
+            if len(burst_phase) <= samples_per_symbol:
+                continue
 
-            # Store results
+            # Convert to kHz so drift/avg_df are consistent.
+            burst_freq = (
+                (burst_phase[samples_per_symbol:] - burst_phase[0:-samples_per_symbol]) / true_symbol_rate
+            ) * 1e-3
+
+            corrected_freq = burst_freq - frequency_offset
+
             frequency_offsets.append(frequency_offset)
             corrected_frequencies.append(corrected_freq)
             delta_time_index = i
 
-        return frequency_offsets, corrected_frequencies, delta_time_index, true_symbol_rate, packet_len, preamble_addres , ble_type
+        return frequency_offsets, corrected_frequencies, delta_time_index, true_symbol_rate, packet_len, preamble_addres, ble_type
 
     @staticmethod
-    def detect_preamble(preamble_bits, fs, data_freq, skip_samp=10, symbol_rate = 1e-6):
+    def detect_preamble(preamble_bits, fs, data_freq, signal, skip_samp=10, symbol_rate=1e-6):
         """
         Detect preamble in frequency-demodulated FSK data using correlation.
 
         Parameters:
         - preamble_bits (np.array): 1D array of bits representing the preamble.
         - fs (float): Sampling frequency in Hz.
-        - data_freq (np.array): Frequency-demodulated data.
+        - data_freq (np.array): Frequency-demodulated data in kHz.
+        - signal (np.array): Complex IQ signal for amplitude masking.
         - skip_samp (int): Number of initial samples to skip in the correlation search.
 
         Returns:
         - corr_output (np.array): Correlation values at each starting point.
-        - preamble_index (int): Index of detected preamble (or None if not found). 
+        - preamble_index (int): Index of detected preamble (or None if not found).
         """
         sync_preamble_length = len(preamble_bits)
         samples_per_us = int(np.round(symbol_rate * fs))
 
-        # Allocate correlation output vector
-        max_index = int(len(data_freq) - (samples_per_us * sync_preamble_length))
+        max_index = int(len(data_freq) - (1 + samples_per_us * sync_preamble_length))
         if max_index <= 0:
-            raise ValueError("The frequency data is too short for preamble detection.")
+            return np.array([]), None
+
         corr_output = np.zeros(max_index)
 
-        # Normalize preamble to match the MATLAB behavior
         preamble_symbols = np.array(preamble_bits) - 0.5
 
-        # Perform correlation search
         for ind_n in range(skip_samp, max_index):
-            # Extract samples corresponding to the preamble 
-            curr_input = data_freq[ind_n : ind_n + samples_per_us * sync_preamble_length : samples_per_us]
+            curr_input = data_freq[ind_n: ind_n + samples_per_us * sync_preamble_length: samples_per_us]
 
             if len(curr_input) == sync_preamble_length:
-                # Dot product correlation
                 corr_output[ind_n] = np.abs(np.dot(preamble_symbols, curr_input))
 
-        # Find index of maximum correlation
+        envelope = np.abs(signal)
+        threshold = np.max(envelope) / 10
+        use_ind = envelope >= threshold
+        corr_output *= use_ind[:len(corr_output)]
+
+        if len(corr_output) == 0:
+            return corr_output, None
+
         preamble_index = np.argmax(corr_output)
         if corr_output[preamble_index] == 0:
             preamble_index = None
@@ -205,7 +230,7 @@ class IQPostProcessing:
         return corr_output, preamble_index
 
     @staticmethod
-    def generate_ble_scrambler(channel = 37, seed_length = 336):
+    def generate_ble_scrambler(channel=37, seed_length=336):
         """
         Generates a BLE scrambler sequence.
         """
@@ -223,409 +248,445 @@ class IQPostProcessing:
             next_stage[1] = LFSR_FIFO[0]
             next_stage[2] = LFSR_FIFO[1]
             next_stage[3] = LFSR_FIFO[2]
-            next_stage[4] = LFSR_FIFO[3] ^ LFSR_FIFO[-1]  # XOR
+            next_stage[4] = LFSR_FIFO[3] ^ LFSR_FIFO[-1]
             next_stage[5] = LFSR_FIFO[4]
             next_stage[6] = LFSR_FIFO[5]
 
             LFSR_FIFO = next_stage
 
         return scrambler_seed
-    
+
     @staticmethod
-    def process_interpolated_burst(signal, preamble_index, fs, fs_inter, 
-                                frequency_offset, num_symbols=376,symbol_time = 1e-6):
+    def process_interpolated_burst(
+        signal,
+        preamble_index,
+        fs,
+        fs_inter,
+        frequency_offset,
+        num_symbols=376,
+        symbol_time=1e-6 ):
         """
         Upsample burst signal, estimate symbol timing adjustment, and demodulate to soft and hard bits.
 
-        Parameters:
-        - signal: np.array, complex-valued burst signal at low sampling rate.
-        - preamble_index: int, index of preamble in low-rate samples.
-        - fs: float, original sampling frequency.
-        - fs_inter: float, high (interpolated) sampling frequency.
-        - frequency_offset: float, frequency offset in MHz.
-        - num_sym_hypo: int, range of timing hypotheses to test (default: 1).
-        - num_symbols: int, number of symbols to extract (default: 376).
-
         Returns:
-        - soft_bits: np.array, soft bits (frequency deviations in MHz) after optimal timing recovery.
+        - soft_bits: np.array, soft bits in kHz after optimal timing recovery and DC removal.
         - hard_bits: np.array, hard bits (1 or -1) from soft bits.
         - updated_timing: int, optimal symbol period in high-rate samples.
-        - est_symbol_clock: float, estimated symbol clock in MHz.
+        - est_symbol_clock: float, estimated symbol duration in microseconds.
         """
-
-        # Resample burst signal to high rate (upsampling)
         up = int(np.round(fs_inter / fs))
         down = 1
-        data_inter = resample_poly(signal, up, down)
+        data_inter = resample_poly(np.asarray(signal, dtype=np.complex128), up, down)
 
-        num_sym_hypo= int(np.ceil(1e-12*fs_inter))
-        # Extract phase and frequency at high sampling rate
+        num_sym_hypo = int(np.ceil(10* fs_inter / fs))
+
         phase_inter = np.unwrap(np.angle(data_inter)) / (2 * np.pi)
         samps_in_symbol_inter = int(np.round(symbol_time * fs_inter))
 
-        freq_inter = (phase_inter[samps_in_symbol_inter:] - phase_inter[:-samps_in_symbol_inter])
-        freq_inter -= frequency_offset * 1e-3  # MHz correction
+        if samps_in_symbol_inter <= 0 or len(phase_inter) <= samps_in_symbol_inter:
+            return np.array([]), np.array([]), None, None
 
-        # Map preamble index to high-rate samples
-        preamble_index_inter = round((preamble_index - 1) * fs_inter / fs)
+        # kHz
+        freq_inter = ((phase_inter[samps_in_symbol_inter:] - phase_inter[:-samps_in_symbol_inter]) / symbol_time) * 1e-3
 
-        # Optimize timing offset by maximizing soft symbol variance
+        freq_inter -= frequency_offset
+
+        preamble_index_inter = round(preamble_index * fs_inter / fs)
+
         variances = []
         for sym_change in range(-num_sym_hypo, num_sym_hypo + 1):
             updated_timing = samps_in_symbol_inter + sym_change
 
-            # Sample symbols with this timing hypothesis
             curr_indices = np.arange(
                 preamble_index_inter,
                 preamble_index_inter + updated_timing * num_symbols,
                 updated_timing,
             )
 
-            # Remove indices beyond available data
             curr_indices = curr_indices[curr_indices < len(freq_inter)]
 
-            # Extract soft symbols
             curr_soft_bits = freq_inter[curr_indices.astype(int)]
-
-            # Store variance of extracted soft symbols
             variances.append(np.std(curr_soft_bits))
 
-        # Select the best timing offset
+        if len(variances) == 0:
+            return np.array([]), np.array([]), None, None
+
         max_timing_index = np.argmax(variances)
         best_timing_offset = max_timing_index - num_sym_hypo
         updated_timing = samps_in_symbol_inter + best_timing_offset
 
-        # Estimate symbol clock in MHz
-        est_symbol_clock = updated_timing / fs_inter * 1e6  # Symbol duration in us
+        if updated_timing <= 0:
+            return np.array([]), np.array([]), None, None
 
-        # Extract final soft bits using the best timing
+        est_symbol_clock = updated_timing / fs_inter * 1e6
+
         final_indices = np.arange(preamble_index_inter, len(freq_inter), updated_timing)
+        final_indices = final_indices[final_indices < len(freq_inter)]
         soft_bits = freq_inter[final_indices.astype(int)]
 
-        # Hard decision based on soft bits
-        hard_bits = np.where(soft_bits >= np.average(soft_bits), 1, -1)
+        soft_bits = soft_bits
+        hard_bits = np.where(soft_bits >= np.mean(soft_bits), 1, -1)
 
         return soft_bits, hard_bits, updated_timing, est_symbol_clock
-    
+
     @staticmethod
     def calc_drift(soft_bits):
-        soft_ones = soft_bits[soft_bits>np.average(soft_bits)]
-        soft_ones_index = np.where(soft_bits>np.average(soft_bits))[0]
-        [drift , freq_key] = np.polyfit(soft_ones_index,soft_ones,1)
-    
-        return [drift , freq_key]
-    
+        """
+        soft_bits are in kHz.
+
+        Returns:
+        - drift_khz_per_symbol: slope of (kHz) vs symbol index  [kHz / symbol]
+        - freq_key_khz: intercept at index 0                    [kHz]
+        """
+        if len(soft_bits) == 0:
+            return [0.0, 0.0]
+        if len(soft_bits) == 1:
+            return [0.0, float(soft_bits[0])]
+
+        idx = np.arange(len(soft_bits))
+        [drift_khz_per_symbol, freq_key_khz] = np.polyfit(idx, soft_bits, 1)
+        return [drift_khz_per_symbol, freq_key_khz]
+
     @staticmethod
-    def calc_avg_df(soft_bits,symbol_rate = 1e-6):
-        # Intuition: calculating the "distance" between the linear fit of the soft "ones" and "zeros" relative to their mean
-        soft_ones = soft_bits[soft_bits>np.average(soft_bits)]
-        soft_ones_index = np.where(soft_bits>np.average(soft_bits))[0]
-        [drift_ones , freq_key_ones] = np.polyfit(soft_ones_index,soft_ones,1)
+    def calc_avg_df(soft_bits, symbol_rate=1e-6):
+        """
+        soft_bits are in kHz.
 
-        soft_zeros = soft_bits[soft_bits<np.average(soft_bits)]
-        soft_zeros_index = np.where(soft_bits<np.average(soft_bits))[0]
-        [drift_zeros , freq_key_zeros] = np.polyfit(soft_zeros_index,soft_zeros,1)
+        Returns:
+        - avg_df_kHz: estimated FSK deviation (kHz)
+        """
+        if len(soft_bits) == 0:
+            return None
 
-        # the distance between the two lines of f(t) = drift*t + freq_key -> df = f_1(t) - f_0(t) ~ freq_key_ones - freq_key_zeros (assuming the drift is similiar) 
-        avg_df_cycles = freq_key_ones - freq_key_zeros
-        
-         # Convert to Hz: Δf = Δφ / T_sym , the chnage from '0'(f) to '1'(f) is twice the deviation from carrier
-        avg_df_Hz = avg_df_cycles / (2*symbol_rate)
+        mean_val = np.mean(soft_bits)
+        ones = soft_bits[soft_bits >= mean_val]
+        zeros = soft_bits[soft_bits < mean_val]
 
-        # Return frequecny deviation in MHz
-        avg_df_MHz = avg_df_Hz / 1e6
-    
-        return avg_df_MHz
-    
+        if len(ones) == 0 or len(zeros) == 0:
+            return None
+
+        tone_sep_khz = np.mean(ones) - np.mean(zeros)
+        avg_df_kHz = tone_sep_khz / 2.0
+        return avg_df_kHz
+
     @staticmethod
-    def calc_freq_offset_by_peak(signal, fs, input_center, plot_on = False, ch_freq = None):
+    def calc_freq_offset_by_peak(signal, fs, input_center, plot_on=False, ch_freq=None):
         N = len(signal)
-        xdelta = 1/fs
+        xdelta = 1 / fs
         fft_result = np.fft.fft(signal)
-        fft_freqs = np.fft.fftfreq(N, d= xdelta)
+        fft_freqs = np.fft.fftfreq(N, d=xdelta)
 
-        # Shift the FFT output
         fft_result_shifted = np.fft.fftshift(fft_result)
         fft_freqs_shifted = np.fft.fftshift(fft_freqs) + input_center
-        
-        peak_ind = np.argmax(fft_result_shifted)
+
+        peak_ind = np.argmax(np.abs(fft_result_shifted))
         peak_freq = fft_freqs_shifted[peak_ind]
-        
-        # Calculating the frequecny offset relative to ch_freq, if ch_freq is None than by input_center
-        if(ch_freq is None):
+
+        if ch_freq is None:
             freq_offset = input_center - peak_freq
         else:
             freq_offset = ch_freq - peak_freq
-        
-        if(plot_on):   
-            # Plot the magnitude spectrum
+
+        if plot_on:
             plt.figure(figsize=(10, 6))
-            plt.plot(peak_freq, 10*np.log(fft_result_shifted[peak_ind]), marker='x',markersize=10, color = 'red')
-            plt.plot(fft_freqs_shifted, 10*np.log(np.abs(fft_result_shifted)))
+            plt.plot(peak_freq, 10 * np.log10(np.abs(fft_result_shifted[peak_ind]) + 1e-12), marker='x', markersize=10, color='red')
+            plt.plot(fft_freqs_shifted, 10 * np.log10(np.abs(fft_result_shifted) + 1e-12))
             plt.title('IQ Data Plot')
             plt.xlabel('Frequency (Hz)')
             plt.ylabel('Magnitude [dB]')
             plt.show()
-        
+
         return freq_offset
-        
-  
+
     @staticmethod
     def return_iq_rec_contant(mat_file_path):
-        try:
-            # Load the IQ file data and unfold it
-            data = sio.loadmat(mat_file_path)
+        data = sio.loadmat(mat_file_path)
 
-            iq_data = data['Y'].flatten()
-            input_center = data['InputCenter'].item()
-            span = data['Span'].item()
-            xdelta = data['XDelta'].item()
-            fs = 1 / xdelta
-            return iq_data , input_center, span, fs
-        except Exception as e:
-            return e
+        iq_data = np.asarray(data['Y']).flatten()
+        input_center = float(np.squeeze(data['InputCenter']))
+        span = float(np.squeeze(data['Span']))
+        xdelta = float(np.squeeze(data['XDelta']))
+        fs = 1 / xdelta
+        return iq_data, input_center, span, fs
 
     @staticmethod
     def calc_packet_start_time(mat_file_path: str, start_time):
         """
         Get the creation_time of a record and return the time from start_time.
-        
+
         If the filename matches the pattern 'iq_<freq>MHz_YYYYMMDD_HHMMSS_microseconds.mat',
         extract the timestamp from the filename. Otherwise, use the file system creation time.
         """
-        # Try to extract timestamp from filename
-        # Pattern: iq_<freq>MHz_YYYYMMDD_HHMMSS_microseconds.mat
         filename = os.path.basename(mat_file_path)
         pattern = r'iq_\d+MHz_(\d{8})_(\d{6})_(\d+)\.mat'
         match = re.match(pattern, filename)
-        
+
         if match:
-            date_str = match.group(1)  # YYYYMMDD
-            time_str = match.group(2)  # HHMMSS
-            microseconds_str = match.group(3)  # microseconds
-            
-            # Parse the datetime
+            date_str = match.group(1)
+            time_str = match.group(2)
+            microseconds_str = match.group(3)
+
             dt = datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S")
-            
-            # Add microseconds and convert to timestamp
             creation_time = dt.timestamp() + int(microseconds_str) / 1_000_000.0
         else:
-            # Fall back to file system creation time
             creation_time = os.path.getctime(mat_file_path)
-        
+
         time_from_start = creation_time - start_time
         return float(time_from_start)
 
     @staticmethod
-    def calc_avg_power (signal:np.array):
-        if(len(signal) != 0):
-            p_avg_dbm = 10*np.log(sum(np.abs(signal))/len(signal)) + 30
+    def calc_avg_power(signal: np.array):
+        if len(signal) != 0:
+            p_avg_dbm = 10 * np.log10(np.mean(np.abs(signal)) + 1e-12) + 30
         else:
             p_avg_dbm = 999
         return p_avg_dbm
-    
+
     @staticmethod
-    def plot_soft_bits(soft_bits, f_offsets, mat_file_path, drift, freq_key, save_path, plot_name):
+    def plot_soft_bits(soft_bits, f_c, freq_ch, mat_file_path, drift_khz_per_packet, freq_key, save_path, plot_name, packet_len):
         """
         Plots soft bits and drift for an IQ recording.
 
-        Parameters:
-        - soft_bits: Array of soft symbols.
-        - f_offsets: Frequency offsets (list or array).
-        - mat_file_path: Path to the .mat file.
-        - drift: Frequency drift per symbol.
-        - freq_key: Initial frequency key for the linear drift.
-        - save_path: Directory where the plot should be saved.
-        - plot_name: Name of the output plot file.
+        NOTE: soft_bits are in kHz.
+        drift_khz_per_packet is kHz across the whole packet.
         """
+        plt.figure(figsize=(10, 6))
         plt.plot(soft_bits, 'x', markersize=5)
-        plt.suptitle(f'IQ Recording Soft Bits, f_offset = {f_offsets[0]} KHz')
-        plt.ylabel("Soft Symbols [MHz]")
+        plt.suptitle(f'IQ Recording Soft Bits, f_offset = {(f_c - freq_ch) * 1e-3} [kHz]')
+        plt.ylabel("Soft Symbols [kHz]")
         plt.xlabel("Bit Number")
         plt.title(f'File path: {mat_file_path}', fontdict={'fontsize': 7})
 
-        # Plot drift
-        lin_reg = np.arange(len(soft_bits)) * drift + freq_key
-        plt.plot(lin_reg, label=f'Drift: {drift * 1e3} kHz/Symbol \n')
-        plt.legend()
-        
-        # Save plot
+        if len(soft_bits) > 0:
+            lin_reg = np.arange(len(soft_bits)) * (drift_khz_per_packet / max(len(soft_bits), 1)) + freq_key
+            plt.plot(lin_reg, label=f'Drift: {drift_khz_per_packet:.3f} kHz (N={packet_len})\n')
+            plt.legend()
+
         save_filepath = os.path.join(save_path, f'{plot_name}.jpeg')
+        os.makedirs(os.path.dirname(save_filepath), exist_ok=True)
         plt.savefig(save_filepath)
-        plt.clf()
+        plt.close()
 
     @staticmethod
     def build_results_payload(
-         time_from_start: float, 
-         raw_packet: str = None,
-         drift = None, 
-         f_offset: float = None,
-         p_avg_dbm: float = None, 
-         crc: str = None,
-         soft_bits:np.array=None,
-         avg_df: float = None, 
-         ble_type: str = None):
+        time_from_start: float,
+        raw_packet: str = None,
+        drift=None,
+        f_offset: float = None,
+        p_avg_dbm: float = None,
+        crc: str = None,
+        soft_bits: np.array = None,
+        avg_df: float = None,
+        ble_type: str = None
+    ):
         results = {
-                "time_from_start" : time_from_start,
-                'VERSION':VERSION,
-                "raw_packet": raw_packet, 
-                "drift": drift,
-                "frequecny_offest":f_offset, 
-                "avg_power":p_avg_dbm,
-                "crc": crc,
-                "soft_bits": soft_bits,
-                "avg_df": avg_df,
-                "ble_type": ble_type}
-        
+            "time_from_start": time_from_start,
+            'VERSION': VERSION,
+            "raw_packet": raw_packet,
+            "drift": drift,
+            "frequecny_offest": f_offset,
+            "avg_power": p_avg_dbm,
+            "crc": crc,
+            "soft_bits": soft_bits,
+            "avg_df": avg_df,
+            "ble_type": ble_type
+        }
         return results
-        
+
     @staticmethod
-    def freq_to_ble_channel(freq:int = 2402):
+    def freq_to_ble_channel(freq: int = 2402):
         ch = 37
-        freq = freq*1e-6 
-        freq_ch = freq
-        if (freq > 2400 and freq < 2404):
+
+        if np.abs(freq) > 1e6:
+            freq_mhz = freq * 1e-6
+        else:
+            freq_mhz = float(freq)
+
+        freq_ch = 2402e6
+
+        if np.isclose(freq_mhz, 2402, atol=1):
             ch = 37
             freq_ch = 2402e6
-        if (freq < 2426 and freq > 2422):
-            ch = 10
+        elif np.isclose(freq_mhz, 2426, atol=1):
+            ch = 38
             freq_ch = 2426e6
-        return ch , freq_ch
-       
+        elif np.isclose(freq_mhz, 2480, atol=1):
+            ch = 39
+            freq_ch = 2480e6
+        elif 2404 <= freq_mhz <= 2424:
+            ch = int(round((freq_mhz - 2404) / 2))
+            ch = min(max(ch, 0), 10)
+            freq_ch = (2404 + 2 * ch) * 1e6
+        elif 2428 <= freq_mhz <= 2478:
+            ch = int(round((freq_mhz - 2428) / 2)) + 11
+            ch = min(max(ch, 11), 36)
+            freq_ch = (2428 + 2 * (ch - 11)) * 1e6
+
+        return ch, freq_ch
+
     @staticmethod
     def process_single_iq_file(mat_file_path: str, save_path: str = None,
-                            start_time: float = 0 , debug_flag: bool = False):
+                               start_time: float = 0, debug_flag: bool = False):
         """
-        Processes an IQ recording from a .mat file using the IQPostProcessing class.
-
-        Parameters:
-        - mat_file_path (str): Path to the .mat file.
-        - save_path (str) : Path to save plots if needed
-        - preamble_addres (str) : Preamble adress (default aad6be898e)
-        - start_time (float) : Staring time relative to records (UTC)
-
         Returns:
-        - results (dict) : 
-            * Contains the recording basename as a key
-            * Values are packet_hex (descramable), freq_offset and drift (in kHz & kHz/Symbol)
+        - results (dict): key=basename, value=payload
+          payload fields:
+            - drift: kHz per packet
+            - frequecny_offest: kHz
+            - avg_df: kHz
         """
-               
-        # Set name and time_from_start
         plot_name = os.path.basename(mat_file_path)
-        time_from_start = IQPostProcessing.calc_packet_start_time(mat_file_path,start_time)
-        
-        # Define output 
+        time_from_start = IQPostProcessing.calc_packet_start_time(mat_file_path, start_time)
+
         result = {}
 
-        # Extract IQ data and metadata
+        # Extract IQ data and recording parameters from the .mat file.
         try:
-            iq_data , input_center, span, fs = IQPostProcessing.return_iq_rec_contant(mat_file_path=mat_file_path)
+            iq_data, input_center, span, fs = IQPostProcessing.return_iq_rec_contant(mat_file_path=mat_file_path)
         except Exception as e:
             debug_flag and print(f"Cannot load file [{mat_file_path}] due to [{e}]")
-            result[plot_name] =  IQPostProcessing.build_results_payload(time_from_start=time_from_start)
+            result[plot_name] = IQPostProcessing.build_results_payload(time_from_start=time_from_start)
             return result
-        # Caculate avrage power in dBm 
+
+        # Calculate average power 
         p_avg_dbm = IQPostProcessing.calc_avg_power(iq_data)
 
-        # Skip if the packet power is near\below the noise floor (here ~ -80dBm)
         if p_avg_dbm < -80 or p_avg_dbm == 999:
-            debug_flag and print(f"Packet power is below -80dBm")
-            return 
-        
-        # Zero padding the IQ data to avoid missing envelope detection
-        iq_data = np.concatenate([np.zeros(495, dtype=iq_data.dtype), iq_data])
-        
-        # Detect bursts in the signal
+            debug_flag and print("Packet power is below -80dBm")
+            return
+
+        # Evelope Detection to find burst segments in the IQ data.
         delta_time, rise_index, fall_index = IQPostProcessing.burst_detect_by_envelope(iq_data, fs)
 
-        # Estimate frequency offset
-        f_offsets, freq_data, delta_time_index, true_symbol_rate, packet_len, preamble_addres , ble_type = IQPostProcessing.estimate_frequency_offset(
+        # Calculate frequency offset and correct frequency data for the detected burst segments.
+        f_offsets, freq_data, delta_time_index, true_symbol_rate, packet_len, preamble_addres, ble_type = IQPostProcessing.estimate_frequency_offset(
             signal=iq_data, rise_index=rise_index, fall_index=fall_index,
-            delta_time_v=delta_time, fs=fs, symbol_rate= 1e-6
+            delta_time_v=delta_time, fs=fs, symbol_rate=1e-6
         )
 
-        if not f_offsets or not freq_data:
+        if not f_offsets or not freq_data or delta_time_index is None:
             debug_flag and print("The packet is too short")
-            result[plot_name] = IQPostProcessing.build_results_payload(time_from_start=time_from_start, p_avg_dbm =p_avg_dbm)
+            result[plot_name] = IQPostProcessing.build_results_payload(time_from_start=time_from_start, p_avg_dbm=p_avg_dbm)
             return result
-        
-        # Update symbol time for preamble detection
-        symbol_rate = true_symbol_rate
-        packet_len = packet_len
-        f_c = np.round(input_center + 1e3*f_offsets[0]) 
-        
-        # Calculate BLE channel
-        ch , freq_ch = IQPostProcessing.freq_to_ble_channel(f_c)
-        
-        # Generate preamble and scrambler seed
-        preamble_bit_vector = IQPostProcessing.hex_to_bit_vector(preamble_addres)
-        sync_preamble_length = len(preamble_bit_vector)
-        scram_seed = IQPostProcessing.generate_ble_scrambler(channel=ch, seed_length=packet_len-sync_preamble_length).astype(int)
-        
-        # Detect preamble
-        corr_output, preamble_index = IQPostProcessing.detect_preamble(preamble_bits=preamble_bit_vector,
-                                                                       fs=fs, data_freq=freq_data[0],symbol_rate=symbol_rate)
-        
-        # Extract relevant IQ data
+
         filtered_iq_data = iq_data[rise_index[delta_time_index]:fall_index[delta_time_index]]
 
-        # Process IQ data with symbol interpolation
-        soft_bits, hard_bits, updated_timing, est_symbol_clock = IQPostProcessing.process_interpolated_burst(
-            signal=filtered_iq_data, preamble_index=preamble_index,frequency_offset=f_offsets[0],
-            fs=fs, fs_inter=200 * fs,num_symbols=packet_len, symbol_time=symbol_rate
+        symbol_rate = true_symbol_rate
+
+        # f_offsets are in kHz, so multiply by 1e3 to get Hz correction.
+        f_c = np.round(input_center + 1e3 * f_offsets[0])
+
+        ch, freq_ch = IQPostProcessing.freq_to_ble_channel(f_c)
+
+        preamble_bit_vector = IQPostProcessing.hex_to_bit_vector(preamble_addres)
+        sync_preamble_length = len(preamble_bit_vector)
+        scram_seed = IQPostProcessing.generate_ble_scrambler(
+            channel=ch,
+            seed_length=max(packet_len - sync_preamble_length, 0)).astype(int)
+
+        corr_output, preamble_index = IQPostProcessing.detect_preamble(
+            preamble_bits=preamble_bit_vector,
+            fs=fs,
+            data_freq=freq_data[0],
+            signal=filtered_iq_data,
+            symbol_rate=symbol_rate
         )
 
-        #calculating drift
-        drift, freq_key = IQPostProcessing.calc_drift(soft_bits)
-        drift = drift * packet_len
-        
-        #calculating DF
-        avg_df = IQPostProcessing.calc_avg_df(soft_bits=soft_bits,symbol_rate=symbol_rate)
-
-        #
-        
-        # Descramble the data
-        harder_bits = ((hard_bits + 1) * 0.5).astype(int)
-        if (len(hard_bits) >= packet_len):
-            packet = np.bitwise_xor(harder_bits[sync_preamble_length:packet_len], scram_seed)
-            packet_hex = IQPostProcessing.bits_to_hex_right_msb(packet)
-        else: #packet is not full
-            result[plot_name] = IQPostProcessing.build_results_payload(time_from_start=time_from_start, drift= drift * 1e3,
-                                 f_offset=(f_c - freq_ch)*1e-3, p_avg_dbm=p_avg_dbm, avg_df=avg_df ,ble_type= ble_type)
+        if preamble_index is None:
+            debug_flag and print("Preamble was not detected")
+            result[plot_name] = IQPostProcessing.build_results_payload(
+                time_from_start=time_from_start,
+                f_offset=(f_c - freq_ch) * 1e-3,
+                p_avg_dbm=p_avg_dbm,
+                ble_type=ble_type
+            )
             return result
-            
+
+        soft_bits, hard_bits, updated_timing, est_symbol_clock = IQPostProcessing.process_interpolated_burst(
+            signal=filtered_iq_data,
+            preamble_index=preamble_index,
+            frequency_offset=f_offsets[0],
+            fs=fs,
+            fs_inter=200 * fs,
+            num_symbols=packet_len,
+            symbol_time=symbol_rate
+        )
+
+        if len(soft_bits) == 0 or len(hard_bits) == 0:
+            debug_flag and print("Interpolated burst processing failed")
+            result[plot_name] = IQPostProcessing.build_results_payload(
+                time_from_start=time_from_start,
+                f_offset=(f_c - freq_ch) * 1e-3,
+                p_avg_dbm=p_avg_dbm,
+                ble_type=ble_type
+            )
+            return result
+
+        drift_khz_per_symbol, freq_key = IQPostProcessing.calc_drift(soft_bits)
+        drift_khz_per_packet = drift_khz_per_symbol * packet_len
+
+        avg_df_kHz = IQPostProcessing.calc_avg_df(soft_bits=soft_bits, symbol_rate=symbol_rate)
+
+        harder_bits = ((hard_bits + 1) * 0.5).astype(int)
+        if len(hard_bits) >= packet_len:
+            packet = np.bitwise_xor(
+                harder_bits[sync_preamble_length:packet_len],
+                scram_seed[:packet_len - sync_preamble_length]
+            )
+            packet_hex = IQPostProcessing.bits_to_hex_right_msb(packet)
+        else:
+            result[plot_name] = IQPostProcessing.build_results_payload(
+                time_from_start=time_from_start,
+                drift=drift_khz_per_packet,
+                f_offset=(f_c - freq_ch) * 1e-3,
+                p_avg_dbm=p_avg_dbm,
+                avg_df=avg_df_kHz,
+                soft_bits=soft_bits.tolist(),
+                ble_type=ble_type
+            )
+            return result
+
         debug_flag and print(f"{os.path.basename(mat_file_path)}: \n{packet_hex}\n")
 
-        
-           
         if save_path is not None:
-            # Plot soft bits
-            IQPostProcessing.plot_soft_bits(freq_key=freq_key, f_offsets=f_offsets,
-                                            mat_file_path=mat_file_path, drift=drift,
-                                            save_path= save_path, plot_name=plot_name,
-                                            soft_bits= soft_bits)
-            
-        result[plot_name] = IQPostProcessing.build_results_payload(
-                time_from_start=time_from_start, 
-                raw_packet=(packet_hex[:-6] + '000000'), 
-                drift= drift * 1e3, 
-                f_offset=(f_c - freq_ch)*1e-3,
-                p_avg_dbm=p_avg_dbm, 
-                avg_df=avg_df, 
-                crc=packet_hex[-6:], 
-                soft_bits=soft_bits.tolist(),
-                ble_type = ble_type
+            IQPostProcessing.plot_soft_bits(
+                freq_key=freq_key,
+                f_c=f_c,
+                freq_ch=freq_ch,
+                mat_file_path=mat_file_path,
+                drift_khz_per_packet=drift_khz_per_packet,
+                save_path=save_path,
+                plot_name=plot_name,
+                soft_bits=soft_bits,
+                packet_len=packet_len
             )
-        
+
+        raw_packet = packet_hex
+        crc = None
+        if len(packet_hex) >= 6:
+            raw_packet = packet_hex[:-6] + '000000'
+            crc = packet_hex[-6:]
+
+        result[plot_name] = IQPostProcessing.build_results_payload(
+            time_from_start=time_from_start,
+            raw_packet=raw_packet,
+            drift=drift_khz_per_packet,
+            f_offset=(f_c - freq_ch) * 1e-3,
+            p_avg_dbm=p_avg_dbm,
+            avg_df=avg_df_kHz,
+            crc=crc,
+            soft_bits=soft_bits.tolist(),
+            ble_type=ble_type
+        )
+
         return result
-        
 
     @staticmethod
     def process_directory_iq_files(
         directory_path: str,
-        start_time: float=0,
+        start_time: float = 0,
         save_path: str = None,
-        debug_flag: bool =False
+        debug_flag: bool = False
         ):
         """
         Processes all IQ recording .mat files in a given directory using the IQPostProcessing class.
@@ -633,7 +694,6 @@ class IQPostProcessing:
         Parameters:
         - directory_path (str): Path to the directory containing .mat files.
         - save_path (str, optional): Path to save plots if needed (default: None).
-        - preamble_addres (str, optional): Preamble address (default: 'P').
 
         Returns:
         - results (dict): Dictionary containing the processing results for each file.
@@ -641,33 +701,30 @@ class IQPostProcessing:
 
         results = {}
 
-        # Get a list of all .mat files in the directory
-        mat_files = [f for f in os.listdir(directory_path) if f.endswith('.mat') or f.endswith('.MAT')]
+        mat_files = sorted([f for f in os.listdir(directory_path) if f.endswith('.mat') or f.endswith('.MAT')])
 
-        # Process each .mat file
         for mat_file in mat_files:
             mat_file_path = os.path.join(directory_path, mat_file)
             debug_flag and print(f"Processing file: {mat_file_path}")
 
-            # Process the file using the existing function
             file_results = IQPostProcessing.process_single_iq_file(
                 mat_file_path=mat_file_path,
-                save_path=save_path, 
+                save_path=save_path,
                 start_time=start_time,
-                debug_flag= debug_flag
+                debug_flag=debug_flag
                 )
 
-            # Store the result in the dictionary
             if file_results:
                 results.update(file_results)
 
-        return results            
-     
+        return results
+
 
 if __name__ == "__main__":
      IQPost = IQPostProcessing()
-    results = IQPost.process_directory_iq_files(
-       r"C:\Users\boaz.arnon\Downloads\matfiles",
-       save_path=r"C:\Users\boaz.arnon\Downloads\matfiles",
+     results = IQPost.process_directory_iq_files(
+       r"mat_files\2MHz BLE5 CH10",
+       save_path=r"mat_files",
        debug_flag=True
     )
+     print(results)
