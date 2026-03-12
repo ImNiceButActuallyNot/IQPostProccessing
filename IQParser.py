@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import resample_poly
 
-VERSION = '2.0.2'
+VERSION = '2.0.3'
 
 
 class IQPostProcessing:
