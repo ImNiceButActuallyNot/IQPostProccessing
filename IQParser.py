@@ -443,6 +443,27 @@ class IQPostProcessing:
         return p_avg_dbm
 
     @staticmethod
+    def plot_eye_diagram(freq_data, fs, f_c, freq_ch, preamble_index, est_symbol_clock, packet_len):
+        # Slicing per symbol and ploting to visualize eye diagram
+        plt.figure(figsize=(10, 6))
+
+        # 1e-6 beacuse est_symbol_clock [usec] and fs [Hz]
+        samples_per_symbol = int(round(1e-6*est_symbol_clock * fs))
+
+        for i in range(packet_len - 2):
+            start_idx = int(round(preamble_index + i * samples_per_symbol))
+            end_idx = start_idx + 2*samples_per_symbol
+            time_axis = np.arange(2*samples_per_symbol)*1/fs * 1e6  # in microseconds
+            if end_idx <= len(freq_data):
+                symbol = freq_data[start_idx:end_idx]
+            plt.plot(time_axis, symbol, alpha=0.5)
+
+        plt.title(f'Frequency Data Eye Diagram, f_offset = {(f_c - freq_ch) * 1e-3} [kHz]')
+        plt.xlabel("Time [usec]")
+        plt.ylabel("Frequency [kHz]")
+        plt.show()
+
+    @staticmethod
     def plot_soft_bits(soft_bits, f_c, freq_ch, mat_file_path, drift_khz_per_packet, freq_key, save_path, plot_name, packet_len):
         """
         Plots soft bits and drift for an IQ recording.
@@ -629,6 +650,10 @@ class IQPostProcessing:
         drift_khz_per_packet = drift_khz_per_symbol * packet_len
 
         avg_df_kHz = IQPostProcessing.calc_avg_df(soft_bits=soft_bits, symbol_rate=symbol_rate)
+
+        IQPostProcessing.plot_eye_diagram(freq_data=freq_data[0],  fs = fs, f_c=f_c,
+                                          freq_ch=freq_ch, preamble_index=preamble_index,
+                                        est_symbol_clock=est_symbol_clock, packet_len=packet_len)
 
         # Converting soft bits to be centered around the real frequecy
         harder_bits = ((hard_bits + 1) * 0.5).astype(int)
