@@ -534,11 +534,11 @@ class IQPostProcessing:
         elif np.isclose(freq_mhz, 2480, atol=1):
             ch = 39
             freq_ch = 2480e6
-        elif 2404 <= freq_mhz <= 2424:
+        elif 2403 <= freq_mhz <= 2425:
             ch = int(round((freq_mhz - 2404) / 2))
             ch = min(max(ch, 0), 10)
             freq_ch = (2404 + 2 * ch) * 1e6
-        elif 2428 <= freq_mhz <= 2478:
+        elif 2427 <= freq_mhz <= 2479:
             ch = int(round((freq_mhz - 2428) / 2)) + 11
             ch = min(max(ch, 11), 36)
             freq_ch = (2428 + 2 * (ch - 11)) * 1e6
@@ -651,10 +651,13 @@ class IQPostProcessing:
 
         avg_df_kHz = IQPostProcessing.calc_avg_df(soft_bits=soft_bits, symbol_rate=symbol_rate)
 
+        '''        
+        #The eye diagram is plotted before DC removal and drift correction to visualize the raw frequency data.
         IQPostProcessing.plot_eye_diagram(freq_data=freq_data[0],  fs = fs, f_c=f_c,
                                           freq_ch=freq_ch, preamble_index=preamble_index,
                                         est_symbol_clock=est_symbol_clock, packet_len=packet_len)
-
+        '''
+        
         # Converting soft bits to be centered around the real frequecy
         harder_bits = ((hard_bits + 1) * 0.5).astype(int)
         if len(hard_bits) >= packet_len:
@@ -671,7 +674,7 @@ class IQPostProcessing:
                 p_avg_dbm=p_avg_dbm,
                 avg_df=avg_df_kHz,
                 soft_bits=soft_bits.tolist(),
-                ble_type=ble_type
+                ble_type=ble_type,
             )
             return result
 
@@ -752,7 +755,7 @@ class IQPostProcessing:
 if __name__ == "__main__":
      IQPost = IQPostProcessing()
      results = IQPost.process_directory_iq_files(
-       r"mat_files\2MHz BLE5 CH10",
+       r"mat_files",
        save_path=r"mat_files",
        debug_flag=True
     )
