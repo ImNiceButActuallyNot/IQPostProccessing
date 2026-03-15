@@ -443,22 +443,19 @@ class IQPostProcessing:
         return p_avg_dbm
 
     @staticmethod
-    def plot_eye_diagram(freq_data, fs, f_c, freq_ch, preamble_index, est_symbol_clock, packet_len):
+    def plot_eye_diagram(freq_data, samples_per_symbol):
         # Slicing per symbol and ploting to visualize eye diagram
         plt.figure(figsize=(10, 6))
 
-        # 1e-6 beacuse est_symbol_clock [usec] and fs [Hz]
-        samples_per_symbol = int(round(1e-6*est_symbol_clock * fs))
-
-        for i in range(packet_len - 2):
-            start_idx = int(round(preamble_index + i * samples_per_symbol))
-            end_idx = start_idx + 2*samples_per_symbol
-            time_axis = np.arange(2*samples_per_symbol)*1/fs * 1e6  # in microseconds
+        for i in range(len(freq_data) // samples_per_symbol - 2):
+            start_idx = i * samples_per_symbol
+            end_idx = start_idx + 2 * samples_per_symbol
+            time_axis = np.arange(2 * samples_per_symbol) * 1 / (samples_per_symbol * 1e6) * 1e6  # in microseconds
             if end_idx <= len(freq_data):
                 symbol = freq_data[start_idx:end_idx]
             plt.plot(time_axis, symbol, alpha=0.5)
-
-        plt.title(f'Frequency Data Eye Diagram, f_offset = {(f_c - freq_ch) * 1e-3} [kHz]')
+       
+        plt.title("Eye Diagram of Frequency Data")
         plt.xlabel("Time [usec]")
         plt.ylabel("Frequency [kHz]")
         plt.show()
@@ -498,7 +495,9 @@ class IQPostProcessing:
         crc: str = None,
         soft_bits: np.array = None,
         avg_df: float = None,
-        ble_type: str = None
+        ble_type: str = None,
+        freq_data: np.array = None,
+        samples_per_symbol: int = None
     ):
         results = {
             "time_from_start": f'{time_from_start} [sec]',
@@ -510,7 +509,9 @@ class IQPostProcessing:
             "crc": crc,
             "soft_bits": soft_bits,
             "avg_df": f'{avg_df} [kHz]',
-            "ble_type": ble_type
+            "ble_type": ble_type,
+            "freq_data": f'{freq_data} [kHz]',
+            "samples_per_symbol": samples_per_symbol
         }
         return results
 
@@ -651,12 +652,10 @@ class IQPostProcessing:
 
         avg_df_kHz = IQPostProcessing.calc_avg_df(soft_bits=soft_bits, symbol_rate=symbol_rate)
 
-        '''        
-        #The eye diagram is plotted before DC removal and drift correction to visualize the raw frequency data.
-        IQPostProcessing.plot_eye_diagram(freq_data=freq_data[0],  fs = fs, f_c=f_c,
-                                          freq_ch=freq_ch, preamble_index=preamble_index,
-                                        est_symbol_clock=est_symbol_clock, packet_len=packet_len)
-        '''
+        # Slicing the frequency data for the eye diagram plot, using the estimated symbol clock to determine the number of samples per symbol.
+        samples_per_symbol = int(round(1e-6 * est_symbol_clock * fs))
+        freq_data_sliced = freq_data[0][preamble_index: preamble_index + packet_len * samples_per_symbol]
+        IQPostProcessing.plot_eye_diagram(freq_data=freq_data_sliced,  samples_per_symbol = samples_per_symbol)
         
         # Converting soft bits to be centered around the real frequecy
         harder_bits = ((hard_bits + 1) * 0.5).astype(int)
@@ -675,6 +674,8 @@ class IQPostProcessing:
                 avg_df=avg_df_kHz,
                 soft_bits=soft_bits.tolist(),
                 ble_type=ble_type,
+                freq_data=freq_data_sliced.tolist(),
+                samples_per_symbol=samples_per_symbol
             )
             return result
 
@@ -708,7 +709,9 @@ class IQPostProcessing:
             avg_df=avg_df_kHz,
             crc=crc,
             soft_bits=soft_bits.tolist(),
-            ble_type=ble_type
+            ble_type=ble_type,
+            freq_data=freq_data_sliced.tolist(),
+            samples_per_symbol=samples_per_symbol
         )
 
         return result
