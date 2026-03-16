@@ -526,23 +526,12 @@ class IQPostProcessing:
 
         freq_ch = 2402e6
 
-        if np.isclose(freq_mhz, 2402, atol=1):
+        if np.isclose(freq_mhz, 2402, atol=2):
             ch = 37
             freq_ch = 2402e6
-        elif np.isclose(freq_mhz, 2426, atol=1):
-            ch = 38
-            freq_ch = 2426e6
-        elif np.isclose(freq_mhz, 2480, atol=1):
-            ch = 39
-            freq_ch = 2480e6
-        elif 2403 <= freq_mhz <= 2425:
-            ch = int(round((freq_mhz - 2404) / 2))
-            ch = min(max(ch, 0), 10)
-            freq_ch = (2404 + 2 * ch) * 1e6
-        elif 2427 <= freq_mhz <= 2479:
-            ch = int(round((freq_mhz - 2428) / 2)) + 11
-            ch = min(max(ch, 11), 36)
-            freq_ch = (2428 + 2 * (ch - 11)) * 1e6
+        elif np.isclose(freq_mhz, 2424, atol=2):
+            ch = 10
+            freq_ch = 2424e6
 
         return ch, freq_ch
 
