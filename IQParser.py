@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import resample_poly
 
-VERSION = '2.0.4'
+VERSION = '2.0.5'
 
 
 class IQPostProcessing:
@@ -526,10 +526,10 @@ class IQPostProcessing:
 
         freq_ch = 2402e6
 
-        if np.isclose(freq_mhz, 2402, atol=2):
+        if np.isclose(freq_mhz, 2402, atol=4):
             ch = 37
             freq_ch = 2402e6
-        elif np.isclose(freq_mhz, 2424, atol=2):
+        elif np.isclose(freq_mhz, 2424, atol=4):
             ch = 10
             freq_ch = 2424e6
 
