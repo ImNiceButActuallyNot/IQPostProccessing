@@ -1,5 +1,6 @@
 # IQPostProccessing
-BLE4/BLE5  IQ data mat file parser from Tektronix RSA_API/SignalVu
+My own BLE4/BLE5  IQ data mat file parser from Tektronix RSA_API/SignalVu
+(basically a .mat IQ file FSK demodulator).  
 
 ## IQParser.py 
 
